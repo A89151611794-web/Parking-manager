@@ -113,6 +113,30 @@ async def help_cmd(update, context):
         '/history НОМЕР — история платежей\n'
         '/id — показать ваш Telegram ID', reply_markup=MENU)
 
+async def send_long_message(message, text, limit=3500):
+    # Telegram limits a message to 4096 characters; leave room for safety.
+    parts=[]
+    current=''
+    for block in text.split('\n\n'):
+        candidate = block if not current else current + '\n\n' + block
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+        if current:
+            parts.append(current)
+            current=''
+        # Also split a single unusually long block without cutting the message limit.
+        while len(block) > limit:
+            cut=block.rfind('\n', 0, limit)
+            if cut < 1: cut=limit
+            parts.append(block[:cut])
+            block=block[cut:].lstrip('\n')
+        current=block
+    if current:
+        parts.append(current)
+    for part in parts:
+        await message.reply_text(part)
+
 async def places(update, context):
     if not is_admin(update): return await deny(update)
     c=db(); rows=c.execute('SELECT * FROM tenants WHERE active=1 ORDER BY place').fetchall(); c.close()
@@ -128,7 +152,7 @@ async def places(update, context):
             f"Следующий месяц оплаты: {month_label(next_month)}\n"
             f"Точная дата следующей оплаты: {next_date.strftime('%d.%m.%Y')}"
         )
-    await update.message.reply_text('\n\n'.join(lines))
+    await send_long_message(update.message, '\n\n'.join(lines))
 
 async def pay(update, context):
     if not is_admin(update): return await deny(update)
@@ -258,5 +282,7 @@ def main():
     app.add_handler(CommandHandler('report',report)); app.add_handler(CommandHandler('history',history)); app.add_handler(CommandHandler('add',add_tenant)); app.add_handler(CommandHandler('edit',edit_fee))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_menu))
     app.run_polling(drop_pending_updates=True)
+
+if __name__=='__main__': main()
 
 if __name__=='__main__': main()
