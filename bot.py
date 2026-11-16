@@ -1,5 +1,5 @@
 import os, csv, sqlite3, logging, calendar
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
@@ -41,6 +41,27 @@ def add_month(ym: str, n: int) -> str:
     return f'{idx // 12:04d}-{idx % 12 + 1:02d}'
 
 def current_month(): return datetime.now(TZ).strftime('%Y-%m')
+
+MONTHS_RU = ('январь', 'февраль', 'март', 'апрель', 'май', 'июнь',
+             'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь')
+
+def month_label(ym: str) -> str:
+    y, m = map(int, ym.split('-'))
+    return f'{MONTHS_RU[m - 1].capitalize()} {y}'
+
+def month_due_date(ym: str, due_day: int | None) -> date:
+    y, m = map(int, ym.split('-'))
+    day = min(due_day or 1, calendar.monthrange(y, m)[1])
+    return date(y, m, day)
+
+def next_unpaid_month(paid_through: str, today: date | None = None) -> str:
+    # An early payment is assigned to the current billing month if it is not
+    # already covered. The schedule remains anchored to the tenant's due_day.
+    today = today or datetime.now(TZ).date()
+    this_month = today.strftime('%Y-%m')
+    after_paid = add_month(paid_through, 1) if paid_through else this_month
+    return max(this_month, after_paid)
+
 def money(n): return f'{n:,.0f}'.replace(',', ' ') + ' ₽'
 
 def import_initial():
@@ -96,8 +117,18 @@ async def places(update, context):
     if not is_admin(update): return await deny(update)
     c=db(); rows=c.execute('SELECT * FROM tenants WHERE active=1 ORDER BY place').fetchall(); c.close()
     if not rows: return await update.message.reply_text('Мест пока нет.')
-    lines=[f"{r['place']} — {r['tenant'] or 'без имени'} — {money(r['monthly_fee'])}/мес. — оплачено по: {r['paid_through'] or 'не указано'}" for r in rows]
-    await update.message.reply_text('\n'.join(lines))
+    today=datetime.now(TZ).date()
+    lines=[]
+    for r in rows:
+        next_month=next_unpaid_month(r['paid_through'], today)
+        next_date=month_due_date(next_month, r['due_day'])
+        lines.append(
+            f"{r['place']} — {r['tenant'] or 'без имени'} — {money(r['monthly_fee'])}/мес.\n"
+            f"Оплачено по: {month_label(r['paid_through']) if r['paid_through'] else 'не указано'}\n"
+            f"Следующий месяц оплаты: {month_label(next_month)}\n"
+            f"Точная дата следующей оплаты: {next_date.strftime('%d.%m.%Y')}"
+        )
+    await update.message.reply_text('\n\n'.join(lines))
 
 async def pay(update, context):
     if not is_admin(update): return await deny(update)
@@ -111,13 +142,22 @@ async def pay(update, context):
     if not r: c.close(); return await update.message.reply_text('Такое активное место не найдено. Проверь номер через /places.')
     amount=int(context.args[2]) if len(context.args)>2 else int(r['monthly_fee'])*months
     if amount <= 0: c.close(); return await update.message.reply_text('Сумма должна быть положительной.')
-    base=r['paid_through'] or add_month(current_month(),-1)
-    period_from=add_month(base,1); period_to=add_month(base,months)
+    today=datetime.now(TZ).date()
+    period_from=next_unpaid_month(r['paid_through'], today)
+    period_to=add_month(period_from, months-1)
+    due_day=r['due_day'] or 1
+    period_start=month_due_date(period_from, due_day)
+    next_due=month_due_date(add_month(period_to,1), due_day)
+    period_end=next_due-timedelta(days=1)
     paid_at=datetime.now(TZ).isoformat(timespec='seconds')
     c.execute('INSERT INTO payments(place,amount,months,paid_at,period_from,period_to) VALUES(?,?,?,?,?,?)',
               (place,amount,months,paid_at,period_from,period_to))
     c.execute('UPDATE tenants SET paid_through=? WHERE place=?',(period_to,place)); c.commit(); c.close()
-    await update.message.reply_text(f'✅ Оплата записана\nМесто: {place}\nСумма: {money(amount)}\nПериод: {period_from} — {period_to}\nСледующая оплата: {add_month(period_to,1)} (день {r["due_day"] or "не задан"})', reply_markup=MENU)
+    await update.message.reply_text(
+        f'✅ Оплата записана\nМесто: {place}\nСумма: {money(amount)}\n'
+        f'Оплачено за: {period_start.strftime("%d.%m.%Y")} — {period_end.strftime("%d.%m.%Y")}\n'
+        f'Следующий месяц оплаты: {month_label(add_month(period_to,1))}\n'
+        f'Точная дата следующей оплаты: {next_due.strftime("%d.%m.%Y")}', reply_markup=MENU)
 
 async def debts(update, context):
     if not is_admin(update): return await deny(update)
@@ -125,12 +165,11 @@ async def debts(update, context):
     rows=c.execute('SELECT * FROM tenants WHERE active=1 ORDER BY due_day,place').fetchall(); c.close()
     out=[]; total=0
     for r in rows:
-        paid=r['paid_through'] or ''
-        if paid < month:
-            due_day=r['due_day'] or 1
-            due=date(today.year,today.month,min(due_day,calendar.monthrange(today.year,today.month)[1]))
+        due_month=next_unpaid_month(r['paid_through'], today)
+        due=month_due_date(due_month, r['due_day'])
+        if due_month == month:
             status='просрочено' if today > due else 'ожидается'
-            out.append(f"{r['place']} — {r['tenant'] or 'без имени'} — {money(r['monthly_fee'])} — {status} (дата {due.strftime('%d.%m')})")
+            out.append(f"{r['place']} — {r['tenant'] or 'без имени'} — {money(r['monthly_fee'])} — {status} (дата {due.strftime('%d.%m.%Y')})")
             total += r['monthly_fee']
     await update.message.reply_text(('\n'.join(out)+f'\n\nИтого к оплате: {money(total)}') if out else 'Задолженностей за текущий месяц нет.')
 
@@ -140,7 +179,7 @@ async def today_due(update, context):
     rows=c.execute('SELECT * FROM tenants WHERE active=1 AND due_day=? ORDER BY place',(today.day,)).fetchall(); c.close()
     rows=[r for r in rows if (r['paid_through'] or '') < month]
     if not rows: return await update.message.reply_text('Сегодня нет ожидаемых оплат. 👍')
-    await update.message.reply_text('Сегодня ожидаются оплаты:\n'+'\n'.join(f"{r['place']} — {r['tenant']} — {money(r['monthly_fee'])}" for r in rows)+f'\nИтого: {money(sum(r["monthly_fee"] for r in rows))}')
+    await update.message.reply_text('Сегодня ожидаются оплаты:\n'+'\n'.join(f"{r['place']} — {r['tenant']} — {money(r['monthly_fee'])} — дата {today.strftime('%d.%m.%Y')}" for r in rows)+f'\nИтого: {money(sum(r["monthly_fee"] for r in rows))}')
 
 async def report(update, context):
     if not is_admin(update): return await deny(update)
@@ -198,7 +237,7 @@ async def daily_reminder(context: ContextTypes.DEFAULT_TYPE):
     rows=c.execute('SELECT * FROM tenants WHERE active=1 AND due_day=? ORDER BY place',(today.day,)).fetchall(); c.close()
     rows=[r for r in rows if (r['paid_through'] or '') < month]
     if rows:
-        msg='🔔 Сегодня срок оплаты паркинга:\n'+'\n'.join(f"{r['place']} — {r['tenant'] or 'без имени'} — {money(r['monthly_fee'])}" for r in rows)+f'\n\nИтого ожидается: {money(sum(r["monthly_fee"] for r in rows))}'
+        msg='🔔 Сегодня срок оплаты паркинга ('+today.strftime('%d.%m.%Y')+'):\n'+'\n'.join(f"{r['place']} — {r['tenant'] or 'без имени'} — {money(r['monthly_fee'])}" for r in rows)+f'\n\nИтого ожидается: {money(sum(r["monthly_fee"] for r in rows))}'
         await context.bot.send_message(chat_id=ADMIN_ID,text=msg)
 
 async def monthly_report_job(context: ContextTypes.DEFAULT_TYPE):
