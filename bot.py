@@ -14,6 +14,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(mess
 MENU = ReplyKeyboardMarkup([
     ['🚗 Места', '💳 Принять оплату'],
     ['↩️ Отменить оплату', '🔄 Изменить номер места'],
+    ['✏️ Изменить данные арендатора', '🗑 Архивировать место'],
     ['⚠️ Должники', '📅 Сегодня оплатить'],
     ['📊 Отчёт за месяц', '➕ Добавить место'],
     ['❓ Помощь']
@@ -120,7 +121,8 @@ async def help_cmd(update, context):
         '/add НОМЕР | ИМЯ | АВТО | СУММА | ДЕНЬ — добавить место\n'
         '/edit НОМЕР СУММА — изменить месячную стоимость\n'
         '/move СТАРЫЙ_НОМЕР НОВЫЙ_НОМЕР — изменить номер места арендатора\n'
-        '/history НОМЕР — история платежей\n'
+        '/archive НОМЕР — архивировать место без удаления истории\n'
+        '/editdata НОМЕР — изменить данные арендатора через меню\n'        '/history НОМЕР — история платежей\n'
         'Кнопка «↩️ Отменить оплату» — отменить последний платёж по месту с подтверждением\n'
         '/id — показать ваш Telegram ID', reply_markup=MENU)
 
@@ -420,6 +422,109 @@ async def move_place_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         f'✅ Номер места успешно изменён: {old} → {new}.\n'
         'Данные арендатора, график оплаты и история платежей сохранены.')
 
+async def archive_menu(update, context):
+    if not is_admin(update): return await deny(update)
+    c=db(); rows=c.execute("SELECT place,tenant,car FROM tenants WHERE active=1 ORDER BY place").fetchall(); c.close()
+    if not rows: return await update.message.reply_text('Нет активных мест для архивации.')
+    buttons=[]
+    for r in rows:
+        label=f"{r['place']} · {r['tenant'] or 'без имени'}"
+        buttons.append([InlineKeyboardButton(label[:60], callback_data=f"archiveselect:{r['place']}")])
+    await update.message.reply_text('Выбери место, которое нужно убрать из активного списка. История платежей сохранится:', reply_markup=InlineKeyboardMarkup(buttons))
+
+async def archive_command(update, context):
+    if not is_admin(update): return await deny(update)
+    if len(context.args)!=1: return await archive_menu(update,context)
+    place=context.args[0]
+    c=db(); r=c.execute('SELECT * FROM tenants WHERE place=? AND active=1',(place,)).fetchone(); c.close()
+    if not r: return await update.message.reply_text('Активное место не найдено.')
+    kb=InlineKeyboardMarkup([[InlineKeyboardButton('✅ Да, архивировать',callback_data=f'archiveconfirm:{place}')],[InlineKeyboardButton('Отмена',callback_data='archivecancel:0')]])
+    await update.message.reply_text(f"Подтверди архивацию места {place}\nАрендатор: {r['tenant'] or 'не указан'}\nАвтомобиль: {r['car'] or 'не указан'}\n\nМесто исчезнет из активного списка и напоминаний. Платежи и история сохранятся.",reply_markup=kb)
+
+async def archive_callback(update, context):
+    q=update.callback_query
+    if not q: return
+    if not (ADMIN_ID and q.from_user and q.from_user.id==ADMIN_ID):
+        await q.answer('Доступ закрыт.',show_alert=True); return
+    try: action,place=q.data.split(':',1)
+    except ValueError:
+        await q.answer('Некорректный запрос.',show_alert=True); return
+    if action=='archiveselect':
+        c=db(); r=c.execute('SELECT * FROM tenants WHERE place=? AND active=1',(place,)).fetchone(); c.close()
+        if not r: await q.answer('Активное место не найдено.',show_alert=True); return
+        kb=InlineKeyboardMarkup([[InlineKeyboardButton('✅ Да, архивировать',callback_data=f'archiveconfirm:{place}')],[InlineKeyboardButton('Отмена',callback_data='archivecancel:0')]])
+        await q.answer(); await q.edit_message_text(f"Подтверди архивацию места {place}\nАрендатор: {r['tenant'] or 'не указан'}\nАвтомобиль: {r['car'] or 'не указан'}\n\nИстория платежей сохранится.",reply_markup=kb); return
+    if action=='archivecancel':
+        await q.answer('Отменено.'); await q.edit_message_text('Место не архивировано.'); return
+    if action=='archiveconfirm':
+        c=db(); cur=c.execute('UPDATE tenants SET active=0 WHERE place=? AND active=1',(place,)); c.commit(); c.close()
+        if not cur.rowcount: await q.answer('Место уже архивировано или не найдено.',show_alert=True); return
+        await q.answer('Место архивировано.'); await q.edit_message_text(f'🗑 Место {place} архивировано. История платежей сохранена.'); return
+    await q.answer('Неизвестное действие.',show_alert=True)
+
+async def editdata_menu(update, context):
+    if not is_admin(update): return await deny(update)
+    if len(context.args)==1:
+        place=context.args[0]
+        c=db(); r=c.execute('SELECT * FROM tenants WHERE place=? AND active=1',(place,)).fetchone(); c.close()
+        if not r: return await update.message.reply_text('Активное место не найдено.')
+        return await show_edit_fields(update.message,place,r)
+    c=db(); rows=c.execute('SELECT place,tenant,car FROM tenants WHERE active=1 ORDER BY place').fetchall(); c.close()
+    if not rows: return await update.message.reply_text('Нет активных мест.')
+    buttons=[]
+    for r in rows:
+        label=f"{r['place']} · {r['tenant'] or 'без имени'}"
+        buttons.append([InlineKeyboardButton(label[:60],callback_data=f'editselect:{r["place"]}')])
+    await update.message.reply_text('Выбери арендатора, данные которого нужно изменить:',reply_markup=InlineKeyboardMarkup(buttons))
+
+async def show_edit_fields(message,place,r):
+    kb=InlineKeyboardMarkup([
+        [InlineKeyboardButton('Имя арендатора',callback_data=f'editfield:{place}:tenant')],
+        [InlineKeyboardButton('Автомобиль',callback_data=f'editfield:{place}:car')],
+        [InlineKeyboardButton('Стоимость в месяц',callback_data=f'editfield:{place}:fee')],
+        [InlineKeyboardButton('День оплаты',callback_data=f'editfield:{place}:day')],
+    ])
+    await message.reply_text(f"Место {place}\nИмя: {r['tenant'] or 'не указано'}\nАвтомобиль: {r['car'] or 'не указан'}\nСтоимость: {money(r['monthly_fee'])}/мес.\nДень оплаты: {r['due_day'] or 'не указан'}\n\nЧто меняем?",reply_markup=kb)
+
+async def editdata_callback(update,context):
+    q=update.callback_query
+    if not q: return
+    if not (ADMIN_ID and q.from_user and q.from_user.id==ADMIN_ID):
+        await q.answer('Доступ закрыт.',show_alert=True); return
+    parts=(q.data or '').split(':')
+    if parts[0]=='editselect' and len(parts)==2:
+        c=db(); r=c.execute('SELECT * FROM tenants WHERE place=? AND active=1',(parts[1],)).fetchone(); c.close()
+        if not r: await q.answer('Место не найдено.',show_alert=True); return
+        await q.answer(); await show_edit_fields(q.message,parts[1],r); return
+    if parts[0]=='editfield' and len(parts)==3:
+        place,field=parts[1],parts[2]
+        prompts={'tenant':'Введи новое имя арендатора:','car':'Введи новое описание автомобиля:','fee':'Введи новую стоимость в рублях за месяц:','day':'Введи новое число месяца для оплаты (1–31):'}
+        if field not in prompts: await q.answer('Неизвестное поле.',show_alert=True); return
+        context.user_data['edit_tenant']={'place':place,'field':field}
+        await q.answer(); await q.message.reply_text(f"Место {place}. {prompts[field]}\nДля имени или автомобиля можно отправить —, чтобы очистить поле."); return
+    await q.answer('Некорректный запрос.',show_alert=True)
+
+async def editdata_text(update,context):
+    pending=context.user_data.get('edit_tenant')
+    if not pending: return False
+    if not is_admin(update): return True
+    value=update.message.text.strip(); place=pending['place']; field=pending['field']
+    if field in ('fee','day'):
+        try: number=int(value)
+        except ValueError:
+            await update.message.reply_text('Нужно отправить целое число. Попробуй ещё раз.'); return True
+        if field=='fee' and number<=0:
+            await update.message.reply_text('Стоимость должна быть больше нуля. Попробуй ещё раз.'); return True
+        if field=='day' and not 1<=number<=31:
+            await update.message.reply_text('День оплаты должен быть от 1 до 31. Попробуй ещё раз.'); return True
+        value=number
+    elif value=='—': value=''
+    c=db(); cur=c.execute(f'UPDATE tenants SET {"monthly_fee" if field=="fee" else "due_day" if field=="day" else field}=? WHERE place=? AND active=1',(value,place)); c.commit(); c.close()
+    context.user_data.pop('edit_tenant',None)
+    if not cur.rowcount: await update.message.reply_text('Место не найдено или уже архивировано.'); return True
+    await update.message.reply_text(f'✅ Данные места {place} обновлены. Оплаченный срок и история платежей не изменены.',reply_markup=MENU)
+    return True
+
 async def edit_fee(update, context):
     if not is_admin(update): return await deny(update)
     if len(context.args)!=2: return await update.message.reply_text('Формат: /edit НОМЕР СУММА')
@@ -439,6 +544,8 @@ async def text_menu(update, context):
     if t=='💳 Принять оплату': return await update.message.reply_text('Введи команду, например: /pay 1211 3 — принять оплату за 3 месяца.')
     if t=='↩️ Отменить оплату': return await cancel_payment_menu(update,context)
     if t=='🔄 Изменить номер места': return await update.message.reply_text('Введи команду: /move СТАРЫЙ_НОМЕР НОВЫЙ_НОМЕР\nНапример: /move 1001 1045')
+    if t=='✏️ Изменить данные арендатора': return await editdata_menu(update,context)
+    if t=='🗑 Архивировать место': return await archive_menu(update,context)
     if t=='➕ Добавить место': return await update.message.reply_text('Введи /add НОМЕР | ИМЯ | АВТО | СУММА | ДЕНЬ')
 
 async def daily_reminder(context: ContextTypes.DEFAULT_TYPE):
@@ -465,10 +572,13 @@ def main():
     app=Application.builder().token(TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler('start',start)); app.add_handler(CommandHandler('id',whoami)); app.add_handler(CommandHandler('help',help_cmd))
     app.add_handler(CommandHandler('places',places)); app.add_handler(CommandHandler('pay',pay)); app.add_handler(CommandHandler('debts',debts)); app.add_handler(CommandHandler('today',today_due))
-    app.add_handler(CommandHandler('report',report)); app.add_handler(CommandHandler('history',history)); app.add_handler(CommandHandler('add',add_tenant)); app.add_handler(CommandHandler('edit',edit_fee)); app.add_handler(CommandHandler('move',move_place))
+    app.add_handler(CommandHandler('report',report)); app.add_handler(CommandHandler('history',history)); app.add_handler(CommandHandler('add',add_tenant)); app.add_handler(CommandHandler('edit',edit_fee)); app.add_handler(CommandHandler('move',move_place)); app.add_handler(CommandHandler('archive',archive_command)); app.add_handler(CommandHandler('editdata',editdata_menu))
     app.add_handler(CallbackQueryHandler(cancel_payment_callback, pattern=r'^(cancelpay|confirmcancel):'))
     app.add_handler(CallbackQueryHandler(move_place_callback, pattern=r'^(moveconfirm|movecancel):'))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_menu))
+    app.add_handler(CallbackQueryHandler(archive_callback, pattern=r'^(archiveselect|archiveconfirm|archivecancel):'))
+    app.add_handler(CallbackQueryHandler(editdata_callback, pattern=r'^(editselect|editfield):'))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, editdata_text), group=0)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_menu), group=0)
     app.run_polling(drop_pending_updates=True)
 
 if __name__=='__main__': main()
