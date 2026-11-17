@@ -578,7 +578,7 @@ def main():
     app.add_handler(CallbackQueryHandler(archive_callback, pattern=r'^(archiveselect|archiveconfirm|archivecancel):'))
     app.add_handler(CallbackQueryHandler(editdata_callback, pattern=r'^(editselect|editfield):'))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, editdata_text), group=0)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_menu), group=0)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_menu), group=1)
     app.run_polling(drop_pending_updates=True)
 
 if __name__=='__main__': main()
