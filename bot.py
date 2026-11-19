@@ -94,17 +94,53 @@ async def help_cmd(update, context):
 
 async def places(update, context):
     if not is_admin(update): return await deny(update)
-    c=db()
-    rows=c.execute('SELECT * FROM tenants WHERE active=1 ORDER BY place').fetchall()
-    total=c.execute('SELECT COALESCE(SUM(monthly_fee), 0) AS total FROM tenants WHERE active=1').fetchone()['total']
+    c = db()
+    rows = c.execute(
+        'SELECT * FROM tenants WHERE active=1 ORDER BY place'
+    ).fetchall()
     c.close()
-    if not rows: return await update.message.reply_text('Мест пока нет.\\n\\nОжидаемые поступления за месяц: 0 ₽')
-    lines=[f"{r['place']} — {r['tenant'] or 'без имени'} — {money(r['monthly_fee'])}/мес. — оплачено по: {r['paid_through'] or 'не указано'}" for r in rows]
-    lines.append('')
-    lines.append('━━━━━━━━━━━━━━━━━━')
-    lines.append(f'💰 Ожидаемые поступления за месяц: {money(total)}')
-    lines.append(f'🚗 Активных мест: {len(rows)}')
-    await update.message.reply_text('\\n'.join(lines))
+
+    if not rows:
+        return await update.message.reply_text('Мест пока нет.')
+
+    # Одна строка на одно активное место — с обычными переносами строк.
+    lines = [
+        f"{r['place']} — {r['tenant'] or 'без имени'} — "
+        f"{money(r['monthly_fee'])}/мес. — оплачено по: "
+        f"{r['paid_through'] or 'не указано'}"
+        for r in rows
+    ]
+
+    # Ожидаемая выручка учитывает все активные места,
+    # независимо от оплаты за текущий месяц.
+    monthly_total = sum(int(r['monthly_fee']) for r in rows)
+    footer = (
+        f"\n\n💰 Ожидаемые поступления за месяц: {money(monthly_total)}"
+        f"\n🚗 Активных мест: {len(rows)}"
+    )
+
+    # Разбиваем длинный список на сообщения Telegram,
+    # сохраняя каждое место целой строкой.
+    chunks = []
+    current = []
+    current_length = 0
+    for line in lines:
+        extra_length = len(line) + (1 if current else 0)
+        if current and current_length + extra_length > 3500:
+            chunks.append('\n'.join(current))
+            current = [line]
+            current_length = len(line)
+        else:
+            current.append(line)
+            current_length += extra_length
+
+    if current:
+        chunks.append('\n'.join(current))
+
+    # Итог показываем только в последнем сообщении.
+    chunks[-1] += footer
+    for chunk in chunks:
+        await update.message.reply_text(chunk)
 
 async def pay(update, context):
     if not is_admin(update): return await deny(update)
