@@ -15,7 +15,12 @@ MENU = ReplyKeyboardMarkup([
     ['🚗 Места', '💳 Принять оплату'],
     ['⚠️ Должники', '📅 Сегодня оплатить'],
     ['📊 Отчёт за месяц', '➕ Добавить место'],
+    ['✏️ Изменить место', '🗑 Удалить место'],
     ['❓ Помощь']
+], resize_keyboard=True)
+
+CONFIRM_DELETE_MENU = ReplyKeyboardMarkup([
+    ['✅ Да, удалить', '↩️ Отмена']
 ], resize_keyboard=True)
 
 def db():
@@ -101,46 +106,46 @@ async def places(update, context):
     c.close()
 
     if not rows:
-        return await update.message.reply_text('Мест пока нет.')
+        return await update.message.reply_text(
+            'Мест пока нет.\\n\\nОжидаемые поступления за месяц: 0 ₽',
+            reply_markup=MENU
+        )
 
-    # Одна строка на одно активное место — с обычными переносами строк.
     lines = [
         f"{r['place']} — {r['tenant'] or 'без имени'} — "
         f"{money(r['monthly_fee'])}/мес. — оплачено по: "
         f"{r['paid_through'] or 'не указано'}"
         for r in rows
     ]
-
-    # Ожидаемая выручка учитывает все активные места,
-    # независимо от оплаты за текущий месяц.
-    monthly_total = sum(int(r['monthly_fee']) for r in rows)
+    total = sum(int(r['monthly_fee']) for r in rows)
     footer = (
-        f"\n\n💰 Ожидаемые поступления за месяц: {money(monthly_total)}"
-        f"\n🚗 Активных мест: {len(rows)}"
+        f"\\n\\n━━━━━━━━━━━━━━━━━━"
+        f"\\n💰 Ожидаемые поступления за месяц: {money(total)}"
+        f"\\n🚗 Активных мест: {len(rows)}"
     )
 
-    # Разбиваем длинный список на сообщения Telegram,
-    # сохраняя каждое место целой строкой.
+    # Telegram message limit: split long lists into several readable messages.
     chunks = []
     current = []
     current_length = 0
     for line in lines:
-        extra_length = len(line) + (1 if current else 0)
-        if current and current_length + extra_length > 3500:
-            chunks.append('\n'.join(current))
+        extra = len(line) + (1 if current else 0)
+        if current and current_length + extra > 3500:
+            chunks.append('\\n'.join(current))
             current = [line]
             current_length = len(line)
         else:
             current.append(line)
-            current_length += extra_length
-
+            current_length += extra
     if current:
-        chunks.append('\n'.join(current))
+        chunks.append('\\n'.join(current))
 
-    # Итог показываем только в последнем сообщении.
     chunks[-1] += footer
-    for chunk in chunks:
-        await update.message.reply_text(chunk)
+    for index, chunk in enumerate(chunks):
+        await update.message.reply_text(
+            chunk,
+            reply_markup=MENU if index == len(chunks) - 1 else None
+        )
 
 async def pay(update, context):
     if not is_admin(update): return await deny(update)
@@ -224,16 +229,168 @@ async def edit_fee(update, context):
     c=db(); cur=c.execute('UPDATE tenants SET monthly_fee=? WHERE place=? AND active=1',(fee,context.args[0])); c.commit(); c.close()
     await update.message.reply_text('Стоимость обновлена.' if cur.rowcount else 'Место не найдено.')
 
+
+async def edit_place_details(update, context, place, details):
+    """Update tenant name, car, monthly fee and due day for an active place."""
+    parts = [part.strip() for part in details.split('|')]
+    if len(parts) != 4:
+        return await update.message.reply_text(
+            'Нужен формат: ИМЯ | АВТО | СУММА | ДЕНЬ\\n'
+            'Пример: Иван | BMW X5 | 30000 | 15\\n'
+            'Если день оплаты не задан, вместо него укажи -'
+        )
+
+    name, car, fee_text, day_text = parts
+    try:
+        fee = int(fee_text.replace(' ', '').replace(',', ''))
+        day = None if day_text == '-' else int(day_text)
+    except ValueError:
+        return await update.message.reply_text('Сумма должна быть числом, день — от 1 до 31 или -.')
+
+    if fee <= 0 or (day is not None and not 1 <= day <= 31):
+        return await update.message.reply_text('Проверь сумму и день оплаты (1–31 или -).')
+
+    c = db()
+    cur = c.execute(
+        'UPDATE tenants SET tenant=?, car=?, monthly_fee=?, due_day=? '
+        'WHERE place=? AND active=1',
+        (name, car, fee, day, place)
+    )
+    c.commit()
+    c.close()
+
+    if not cur.rowcount:
+        return await update.message.reply_text('Активное место не найдено.')
+    context.user_data.pop('parking_action', None)
+    context.user_data.pop('parking_edit_place', None)
+    await update.message.reply_text(
+        f'✅ Данные места {place} обновлены.\\n'
+        f'Арендатор: {name or "не указан"}\\n'
+        f'Автомобиль: {car or "не указан"}\\n'
+        f'Стоимость: {money(fee)}/мес.\\n'
+        f'День оплаты: {day if day is not None else "не задан"}',
+        reply_markup=MENU
+    )
+
+
+async def begin_delete_place(update, context, place):
+    c = db()
+    row = c.execute(
+        'SELECT place, tenant, monthly_fee FROM tenants WHERE place=? AND active=1',
+        (place,)
+    ).fetchone()
+    c.close()
+    if not row:
+        context.user_data.pop('parking_action', None)
+        return await update.message.reply_text('Активное место не найдено.', reply_markup=MENU)
+
+    context.user_data['parking_action'] = 'confirm_delete'
+    context.user_data['parking_delete_place'] = place
+    await update.message.reply_text(
+        f'Подтверди деактивацию места {place}: {row["tenant"] or "без имени"} '
+        f'— {money(row["monthly_fee"])}/мес.\\n\\n'
+        'Место исчезнет из активного списка и перестанет входить в прогноз. '
+        'История платежей сохранится.',
+        reply_markup=CONFIRM_DELETE_MENU
+    )
+
 async def text_menu(update, context):
     if not is_admin(update): return
-    t=update.message.text
-    if t=='🚗 Места': return await places(update,context)
-    if t=='⚠️ Должники': return await debts(update,context)
-    if t=='📅 Сегодня оплатить': return await today_due(update,context)
-    if t=='📊 Отчёт за месяц': return await report(update,context)
-    if t=='❓ Помощь': return await help_cmd(update,context)
-    if t=='💳 Принять оплату': return await update.message.reply_text('Введи команду, например: /pay 1211 3 — принять оплату за 3 месяца.')
-    if t=='➕ Добавить место': return await update.message.reply_text('Введи /add НОМЕР | ИМЯ | АВТО | СУММА | ДЕНЬ')
+    t = (update.message.text or '').strip()
+
+    action = context.user_data.get('parking_action')
+
+    if t.lower() == 'отмена' or t == '↩️ Отмена':
+        context.user_data.pop('parking_action', None)
+        context.user_data.pop('parking_edit_place', None)
+        context.user_data.pop('parking_delete_place', None)
+        return await update.message.reply_text('Действие отменено.', reply_markup=MENU)
+
+    # Guided edit flow: choose a place, then enter updated details.
+    if action == 'edit_place':
+        c = db()
+        row = c.execute(
+            'SELECT place FROM tenants WHERE place=? AND active=1', (t,)
+        ).fetchone()
+        c.close()
+        if not row:
+            return await update.message.reply_text(
+                'Активное место с таким номером не найдено. Введи номер ещё раз или нажми «Отмена».'
+            )
+        context.user_data['parking_edit_place'] = t
+        context.user_data['parking_action'] = 'edit_details'
+        return await update.message.reply_text(
+            f'Место {t}. Введи новые данные одной строкой:\\n'
+            'ИМЯ | АВТО | СУММА | ДЕНЬ\\n'
+            'Например: Иван | BMW X5 | 30000 | 15\\n'
+            'Если день оплаты не задан, укажи -'
+        )
+
+    if action == 'edit_details':
+        place = context.user_data.get('parking_edit_place')
+        return await edit_place_details(update, context, place, t)
+
+    # Guided delete flow with an explicit confirmation.
+    if action == 'delete_place':
+        return await begin_delete_place(update, context, t)
+
+    if action == 'confirm_delete':
+        if t == '↩️ Отмена':
+            context.user_data.pop('parking_action', None)
+            context.user_data.pop('parking_delete_place', None)
+            return await update.message.reply_text('Удаление отменено.', reply_markup=MENU)
+        if t == '✅ Да, удалить':
+            place = context.user_data.get('parking_delete_place')
+            c = db()
+            cur = c.execute(
+                'UPDATE tenants SET active=0 WHERE place=? AND active=1', (place,)
+            )
+            c.commit()
+            c.close()
+            context.user_data.pop('parking_action', None)
+            context.user_data.pop('parking_delete_place', None)
+            if cur.rowcount:
+                return await update.message.reply_text(
+                    f'🗑 Место {place} деактивировано. История платежей сохранена.',
+                    reply_markup=MENU
+                )
+            return await update.message.reply_text('Место уже не активно.', reply_markup=MENU)
+        return await update.message.reply_text(
+            'Нажми «✅ Да, удалить» или «↩️ Отмена».',
+            reply_markup=CONFIRM_DELETE_MENU
+        )
+
+    if t == '🚗 Места': return await places(update, context)
+    if t == '⚠️ Должники': return await debts(update, context)
+    if t == '📅 Сегодня оплатить': return await today_due(update, context)
+    if t == '📊 Отчёт за месяц': return await report(update, context)
+    if t == '❓ Помощь': return await help_cmd(update, context)
+    if t == '💳 Принять оплату':
+        return await update.message.reply_text(
+            'Введи команду, например: /pay 1211 3 — принять оплату за 3 месяца.',
+            reply_markup=MENU
+        )
+    if t == '➕ Добавить место':
+        return await update.message.reply_text(
+            'Введи /add НОМЕР | ИМЯ | АВТО | СУММА | ДЕНЬ',
+            reply_markup=MENU
+        )
+    if t == '✏️ Изменить место':
+        context.user_data['parking_action'] = 'edit_place'
+        return await update.message.reply_text(
+            'Введи номер места, данные которого нужно изменить.\\n'
+            'Затем бот попросит новые имя, авто, стоимость и день оплаты.\\n'
+            'Для отмены напиши «Отмена».',
+            reply_markup=MENU
+        )
+    if t == '🗑 Удалить место':
+        context.user_data['parking_action'] = 'delete_place'
+        return await update.message.reply_text(
+            'Введи номер места, которое нужно деактивировать.\\n'
+            'Я сначала покажу его данные и попрошу подтверждение.\\n'
+            'История платежей не удаляется.',
+            reply_markup=MENU
+        )
 
 async def daily_reminder(context: ContextTypes.DEFAULT_TYPE):
     if not ADMIN_ID: return
