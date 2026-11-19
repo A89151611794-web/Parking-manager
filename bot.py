@@ -107,7 +107,7 @@ async def places(update, context):
 
     if not rows:
         return await update.message.reply_text(
-            'Мест пока нет.\\n\\nОжидаемые поступления за месяц: 0 ₽',
+            'Мест пока нет.\n\nОжидаемые поступления за месяц: 0 ₽',
             reply_markup=MENU
         )
 
@@ -119,9 +119,9 @@ async def places(update, context):
     ]
     total = sum(int(r['monthly_fee']) for r in rows)
     footer = (
-        f"\\n\\n━━━━━━━━━━━━━━━━━━"
-        f"\\n💰 Ожидаемые поступления за месяц: {money(total)}"
-        f"\\n🚗 Активных мест: {len(rows)}"
+        f"\n\n━━━━━━━━━━━━━━━━━━"
+        f"\n💰 Ожидаемые поступления за месяц: {money(total)}"
+        f"\n🚗 Активных мест: {len(rows)}"
     )
 
     # Telegram message limit: split long lists into several readable messages.
@@ -131,14 +131,14 @@ async def places(update, context):
     for line in lines:
         extra = len(line) + (1 if current else 0)
         if current and current_length + extra > 3500:
-            chunks.append('\\n'.join(current))
+            chunks.append('\n'.join(current))
             current = [line]
             current_length = len(line)
         else:
             current.append(line)
             current_length += extra
     if current:
-        chunks.append('\\n'.join(current))
+        chunks.append('\n'.join(current))
 
     chunks[-1] += footer
     for index, chunk in enumerate(chunks):
@@ -235,8 +235,8 @@ async def edit_place_details(update, context, place, details):
     parts = [part.strip() for part in details.split('|')]
     if len(parts) != 4:
         return await update.message.reply_text(
-            'Нужен формат: ИМЯ | АВТО | СУММА | ДЕНЬ\\n'
-            'Пример: Иван | BMW X5 | 30000 | 15\\n'
+            'Нужен формат: ИМЯ | АВТО | СУММА | ДЕНЬ\n'
+            'Пример: Иван | BMW X5 | 30000 | 15\n'
             'Если день оплаты не задан, вместо него укажи -'
         )
 
@@ -264,10 +264,10 @@ async def edit_place_details(update, context, place, details):
     context.user_data.pop('parking_action', None)
     context.user_data.pop('parking_edit_place', None)
     await update.message.reply_text(
-        f'✅ Данные места {place} обновлены.\\n'
-        f'Арендатор: {name or "не указан"}\\n'
-        f'Автомобиль: {car or "не указан"}\\n'
-        f'Стоимость: {money(fee)}/мес.\\n'
+        f'✅ Данные места {place} обновлены.\n'
+        f'Арендатор: {name or "не указан"}\n'
+        f'Автомобиль: {car or "не указан"}\n'
+        f'Стоимость: {money(fee)}/мес.\n'
         f'День оплаты: {day if day is not None else "не задан"}',
         reply_markup=MENU
     )
@@ -288,7 +288,7 @@ async def begin_delete_place(update, context, place):
     context.user_data['parking_delete_place'] = place
     await update.message.reply_text(
         f'Подтверди деактивацию места {place}: {row["tenant"] or "без имени"} '
-        f'— {money(row["monthly_fee"])}/мес.\\n\\n'
+        f'— {money(row["monthly_fee"])}/мес.\n\n'
         'Место исчезнет из активного списка и перестанет входить в прогноз. '
         'История платежей сохранится.',
         reply_markup=CONFIRM_DELETE_MENU
@@ -320,9 +320,9 @@ async def text_menu(update, context):
         context.user_data['parking_edit_place'] = t
         context.user_data['parking_action'] = 'edit_details'
         return await update.message.reply_text(
-            f'Место {t}. Введи новые данные одной строкой:\\n'
-            'ИМЯ | АВТО | СУММА | ДЕНЬ\\n'
-            'Например: Иван | BMW X5 | 30000 | 15\\n'
+            f'Место {t}. Введи новые данные одной строкой:\n'
+            'ИМЯ | АВТО | СУММА | ДЕНЬ\n'
+            'Например: Иван | BMW X5 | 30000 | 15\n'
             'Если день оплаты не задан, укажи -'
         )
 
@@ -378,16 +378,16 @@ async def text_menu(update, context):
     if t == '✏️ Изменить место':
         context.user_data['parking_action'] = 'edit_place'
         return await update.message.reply_text(
-            'Введи номер места, данные которого нужно изменить.\\n'
-            'Затем бот попросит новые имя, авто, стоимость и день оплаты.\\n'
+            'Введи номер места, данные которого нужно изменить.\n'
+            'Затем бот попросит новые имя, авто, стоимость и день оплаты.\n'
             'Для отмены напиши «Отмена».',
             reply_markup=MENU
         )
     if t == '🗑 Удалить место':
         context.user_data['parking_action'] = 'delete_place'
         return await update.message.reply_text(
-            'Введи номер места, которое нужно деактивировать.\\n'
-            'Я сначала покажу его данные и попрошу подтверждение.\\n'
+            'Введи номер места, которое нужно деактивировать.\n'
+            'Я сначала покажу его данные и попрошу подтверждение.\n'
             'История платежей не удаляется.',
             reply_markup=MENU
         )
